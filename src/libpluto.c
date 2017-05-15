@@ -345,19 +345,21 @@ int compute_tile_footprint(isl_union_set *domains,
     isl_union_map *accesses, *accesses_range;
     isl_union_set *accesses_range_set;
     isl_union_pw_qpolynomial *card;
-    /* isl_union_map_dump(read); */
-    /* isl_union_map_dump(schedule); */
-    /* isl_union_set_dump(domains); */
+    //isl_union_map_dump(read);
+    //isl_union_map_dump(schedule);
+    //isl_union_set_dump(domains);
 
     int count=0;
 
     accesses = isl_union_map_union(isl_union_map_copy(read), isl_union_map_copy(write));
-    accesses_range = isl_union_map_apply_domain(isl_union_map_copy(schedule), isl_union_map_copy(accesses));
-    accesses_range_set = isl_union_map_range(isl_union_map_copy(accesses_range));
-    card = isl_union_set_card(isl_union_map_copy(accesses_range_set));
-    //isl_union_set_dump(accesses_range_set);
-    //isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &count);
+    accesses_range = isl_union_map_range(isl_union_map_copy(accesses));
+    isl_union_map_dump(accesses_range);
+    card = isl_union_set_card(isl_union_map_copy(accesses_range));
     isl_union_pw_qpolynomial_foreach_pw_qpolynomial(card, &pw_qpolynomial_dump, NULL);
+
+
+
+    //isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &count);
 
     isl_union_pw_qpolynomial_free(card);
     isl_union_map_free(accesses);
