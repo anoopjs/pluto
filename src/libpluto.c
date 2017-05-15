@@ -30,7 +30,8 @@
 #include "program.h"
 #include "pluto/libpluto.h"
 #include "isl/map.h"
-
+#include "isl/polynomial.h"
+#include "barvinok/isl.h"
 #include "candl/scop.h"
 
 PlutoOptions *options;
@@ -319,6 +320,52 @@ PlutoConstraints *normalize_domain_schedule(Stmt *stmt, PlutoProg *prog)
     return sched;
 }
 
+static isl_stat pw_qpolynomial_dump(__isl_take isl_pw_qpolynomial *pwqp,
+                                   void *user)
+{
+    isl_pw_qpolynomial_dump(pwqp);
+    isl_pw_qpolynomial_free(pwqp);
+	return isl_stat_ok;
+}
+static int count_tile_footprint_access(__isl_take isl_map *set, void *user)
+{
+    isl_map_dump(set);
+    //isl_map_apply_domain(isl_map_i *map1, isl_map *map2);
+
+
+    isl_map_free(set);
+    return isl_stat_ok;
+}
+
+int compute_tile_footprint(isl_union_set *domains,
+                           isl_union_map *schedule,
+                           isl_union_map *read,
+                           isl_union_map *write)
+{
+    isl_union_map *accesses, *accesses_range;
+    isl_union_set *accesses_range_set;
+    isl_union_pw_qpolynomial *card;
+    /* isl_union_map_dump(read); */
+    /* isl_union_map_dump(schedule); */
+    /* isl_union_set_dump(domains); */
+
+    int count=0;
+
+    accesses = isl_union_map_union(isl_union_map_copy(read), isl_union_map_copy(write));
+    accesses_range = isl_union_map_apply_domain(isl_union_map_copy(schedule), isl_union_map_copy(accesses));
+    accesses_range_set = isl_union_map_range(isl_union_map_copy(accesses_range));
+    card = isl_union_set_card(isl_union_map_copy(accesses_range_set));
+    //isl_union_set_dump(accesses_range_set);
+    //isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &count);
+    isl_union_pw_qpolynomial_foreach_pw_qpolynomial(card, &pw_qpolynomial_dump, NULL);
+
+    isl_union_pw_qpolynomial_free(card);
+    isl_union_map_free(accesses);
+    isl_union_map_free(accesses_range);
+    isl_union_set_free(accesses_range_set);
+    return 0;
+}
+
 /*
  * Output schedules are isl relations that have dims in the order
  * isl_dim_out, isl_dim_in, div, param, const
@@ -501,6 +548,12 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
 
         pluto_constraints_free(sched);
     }
+
+    {
+        int tile_footprint;
+        tile_footprint = compute_tile_footprint(domains, schedules, read, write);
+    }
+
 
     pluto_prog_free(prog);
     isl_space_free(space);
