@@ -45,6 +45,12 @@ struct pluto_access_meta_info {
     int npar;
 };
 
+
+struct pluto_schedule_meta_info {
+  PlutoProg *prog;
+  isl_union_map *sched;
+};
+
 /* Copied from petext.c */
 /* Extract a Pluto access function from isl_basic_map */
 static int isl_basic_map_extract_access_func(__isl_take isl_basic_map *bmap, void *user)
@@ -327,44 +333,78 @@ static isl_stat pw_qpolynomial_dump(__isl_take isl_pw_qpolynomial *pwqp,
     isl_pw_qpolynomial_free(pwqp);
 	return isl_stat_ok;
 }
-static int count_tile_footprint_access(__isl_take isl_map *set, void *user)
+static int count_tile_footprint_access(__isl_take isl_map *map, void *user)
 {
-    isl_map_dump(set);
-    //isl_map_apply_domain(isl_map_i *map1, isl_map *map2);
+    struct pluto_schedule_meta_info *psmi = (struct pluto_schedule_meta_info *) user;
+    isl_union_map *sched = psmi->sched;
+    PlutoProg *prog = psmi->prog;
+    isl_map *mem_to_stmt;
+    isl_union_map *mem_to_sched, *mem_to_stmt2;
+    int num, level, j, div;
+    int64 *super_func;
+    //isl_map_dump(map);
+    sscanf(isl_map_get_tuple_name(map, isl_dim_in), "S_%d", &num);
+    Stmt *stmt = prog->stmts[num];
+    /* isl_union_map_dump(sched); */
+    mem_to_stmt = isl_map_fixed_power_val(isl_map_copy(map), isl_val_negone(isl_map_get_ctx(map)));
+    //isl_map_dump(mem_to_stmt);
 
+    mem_to_stmt2 = isl_union_map_from_map(isl_map_copy(mem_to_stmt));
+    mem_to_sched = isl_union_map_apply_range(isl_union_map_copy(mem_to_stmt2),
+                                             isl_union_map_copy(sched));
+    //isl_union_map_dump(mem_to_sched);
+    printf("(");
+    for (level=0; level<stmt->trans->nrows; level++) {
+      pluto_stmt_print_hyperplane(stdout, stmt, level);
+      /* for (j = 0; j < stmt->dim; j++) { */
 
-    isl_map_free(set);
+      /*   super_func = pluto_check_supernode(stmt, j, &div); */
+      /*   if (super_func) { */
+      /*     printf("%d,", div); */
+      /*     free(super_func); */
+      /*     break; */
+      /*   } */
+      /* } */
+      /* if (j==stmt->dim) { */
+      /*   printf("0,"); */
+      /* } */
+      printf("%,");
+    }
+    printf(")\n");
+
+    isl_map_free(map);
+    isl_map_free(mem_to_stmt);
+    isl_union_map_free(mem_to_sched);
+    isl_union_map_free(mem_to_stmt2);
     return isl_stat_ok;
 }
 
 int compute_tile_footprint(isl_union_set *domains,
                            isl_union_map *schedule,
                            isl_union_map *read,
-                           isl_union_map *write)
+                           isl_union_map *write,
+                           PlutoProg *prog)
 {
-    isl_union_map *accesses, *accesses_range;
+    isl_union_map *accesses, *sched;
     isl_union_set *accesses_range_set;
     isl_union_pw_qpolynomial *card;
-    //isl_union_map_dump(read);
-    //isl_union_map_dump(schedule);
-    //isl_union_set_dump(domains);
+    struct pluto_schedule_meta_info psmi = {prog, sched};
+    /* isl_union_map_dump(read); */
+    /* isl_union_map_dump(schedule); */
+    /* isl_union_set_dump(domains); */
 
     int count=0;
 
     accesses = isl_union_map_union(isl_union_map_copy(read), isl_union_map_copy(write));
-    accesses_range = isl_union_map_range(isl_union_map_copy(accesses));
-    isl_union_map_dump(accesses_range);
-    card = isl_union_set_card(isl_union_map_copy(accesses_range));
-    isl_union_pw_qpolynomial_foreach_pw_qpolynomial(card, &pw_qpolynomial_dump, NULL);
+    sched = isl_union_map_intersect_domain(isl_union_map_copy(schedule), isl_union_map_copy(domains));
+    isl_union_map_dump(sched);
+    isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &psmi);
 
-
-
-    //isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &count);
-
+    //isl_union_pw_qpolynomial_foreach_pw_qpolynomial(card, &pw_qpolynomial_dump, NULL);
     isl_union_pw_qpolynomial_free(card);
     isl_union_map_free(accesses);
-    isl_union_map_free(accesses_range);
-    isl_union_set_free(accesses_range_set);
+    isl_union_map_free(sched);
+//isl_union_set_free(accesses_range_set);
     return 0;
 }
 
@@ -553,7 +593,7 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
 
     {
         int tile_footprint;
-        tile_footprint = compute_tile_footprint(domains, schedules, read, write);
+        tile_footprint = compute_tile_footprint(domains, schedules, read, write, prog);
     }
 
 

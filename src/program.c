@@ -1380,7 +1380,7 @@ void pluto_stmt_print(FILE *fp, const Stmt *stmt)
  * pos: position of the supernode in the domain
  *
  */
-static int64 *pluto_check_supernode(const Stmt *stmt, int pos, 
+int64 *pluto_check_supernode(const Stmt *stmt, int pos,
         int *tile_size)
 {
     int lb_pos, ub_pos, r, c;
