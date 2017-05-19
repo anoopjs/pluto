@@ -28,7 +28,6 @@
 #include "program.h"
 #include "transforms.h"
 
-
 /* Read tile sizes from file tile.sizes */
 static int read_tile_sizes(int *tile_sizes, int *l2_tile_size_ratios,
         int num_tile_dims, Stmt **stmts, int nstmts, int firstLoop)
