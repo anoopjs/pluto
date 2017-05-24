@@ -54,6 +54,9 @@ struct pluto_tile_footprint_meta_info {
     PlutoProg *prog;
     isl_union_map *sched;
     long *tile_footprint;
+    isl_union_map *read;
+    isl_union_map *write;
+    isl_union_set *domain;
 };
 
 /* Copied from petext.c */
@@ -471,7 +474,7 @@ int compute_tile_footprint(isl_union_set *domains,
                                    isl_union_map_copy(write));
     sched = isl_union_map_intersect_domain(isl_union_map_copy(schedule),
                                            isl_union_set_copy(domains));
-    struct pluto_tile_footprint_meta_info psmi = {prog, sched, &tile_footprint};
+    struct pluto_tile_footprint_meta_info psmi = {prog, sched, &tile_footprint, NULL, NULL, NULL};
     isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &psmi);
     printf("%li\n", tile_footprint);
     isl_union_map_free(accesses);
@@ -517,6 +520,101 @@ __isl_give isl_union_map *isl_union_map_for_pluto_schedule(PlutoProg *prog,
     return schedules;
 }
 
+static int tile_footprint_tile_size(__isl_take isl_point *pnt, void *user)
+{
+    int j;
+    Stmt **stmts;
+    Dep **deps;
+    Dep **transdeps;
+    HyperplaneProperties *hProps;
+
+    struct pluto_tile_footprint_meta_info *psmi = (struct pluto_tile_footprint_meta_info *) user;
+    isl_union_map *read = psmi->read;
+    isl_union_map *write = psmi->write;
+    isl_union_set *domain = psmi->domain;
+    PlutoProg *prog = psmi->prog;
+    isl_union_map *schedules;
+    isl_ctx *ctx = isl_union_set_get_ctx(domain);
+    isl_space *space = isl_union_set_get_space(domain), *tile_size_space;
+    int num_hyperplanes = prog->num_hyperplanes;
+    int nvar = prog->nvar;
+    int tile_dim;
+
+    FILE *tsfile = fopen("tile.sizes", "w");
+
+    if (!tsfile)
+        return 0;
+
+    tile_size_space = isl_point_get_space(pnt);
+    tile_dim = isl_space_dim(tile_size_space, isl_dim_set);
+
+
+    for (j = 0; j < tile_dim; j++) {
+        isl_val *val = isl_point_get_coordinate_val(pnt, isl_dim_set, j);
+        int dim_size = isl_val_get_num_si(val);
+        fprintf(tsfile, "%d ", (int) pow(2, dim_size));
+        printf("%d ", (int) pow(2, dim_size));
+        isl_val_free(val);
+    }
+
+    fclose(tsfile);
+    stmts = (Stmt **) malloc(prog->nstmts * sizeof (Stmt *));
+    deps = (Dep **) malloc(prog->ndeps * sizeof (Dep *));
+    transdeps = (Dep **) malloc(prog->ntransdeps * sizeof (Dep *));
+
+    for (j = 0; j < prog->nstmts; j++) {
+        stmts[j] = pluto_stmt_dup(prog->stmts[j]);
+    }
+    for (j = 0; j < prog->ndeps; j++) {
+        deps[j] = pluto_dep_dup(prog->deps[j]);
+    }
+    for (j = 0; j < prog->ntransdeps; j++) {
+        transdeps[j] = pluto_dep_dup(prog->transdeps[j]);
+    }
+    hProps = (HyperplaneProperties *) malloc(num_hyperplanes * sizeof(HyperplaneProperties));
+    for (j = 0; j < num_hyperplanes; j++) {
+        hProps[j].band_num = prog->hProps[j].band_num;
+        hProps[j].dep_prop = prog->hProps[j].dep_prop;
+        hProps[j].prevec = prog->hProps[j].prevec;
+        hProps[j].type = prog->hProps[j].type;
+        hProps[j].unroll = prog->hProps[j].unroll;
+    }
+
+    pluto_compute_dep_directions(prog);
+    pluto_compute_dep_satisfaction(prog);
+
+    pluto_tile(prog);
+    schedules = isl_union_map_for_pluto_schedule(prog, ctx, space);
+    compute_tile_footprint(domain, schedules, read, write, prog);
+
+    for (j = 0; j < prog->nstmts; j++) {
+        pluto_stmt_free(prog->stmts[j]);
+        prog->stmts[j] = stmts[j];
+    }
+    for (j = 0; j < prog->ndeps; j++) {
+        pluto_dep_free(prog->deps[j]);
+        prog->deps[j] = deps[j];
+    }
+    for (j = 0; j < prog->ntransdeps; j++) {
+        pluto_dep_free(prog->transdeps[j]);
+        prog->transdeps[j] = transdeps[j];
+    }
+
+    free(prog->hProps);
+    prog->num_hyperplanes = num_hyperplanes;
+    prog->hProps = hProps;
+    prog->nvar = nvar;
+
+    free(stmts);
+    free(deps);
+    free(transdeps);
+
+    isl_union_map_free(schedules);
+    isl_point_free(pnt);
+    isl_space_free(space);
+    isl_space_free(tile_size_space);
+    return isl_stat_ok;
+}
 /*
  * Output schedules are isl relations that have dims in the order
  * isl_dim_out, isl_dim_in, div, param, const
@@ -527,11 +625,14 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
      isl_union_map *write,
      PlutoOptions *options_l)
 {
-    int i, nbands, n_ibands, retval;
+    int i, j, nbands, n_ibands, retval;
     isl_ctx *ctx;
     isl_space *space;
     double t_t, t_all, t_start;
     isl_union_map *schedules;
+    isl_set *tile_sizes;
+    isl_constraint *c;
+    isl_space *tile_space;
 
     ctx = isl_union_set_get_ctx(domains);
     space = isl_union_set_get_space(domains);
@@ -566,11 +667,11 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     }
 
     for (i = 0; i<prog->nstmts; i++) {
-	isl_union_map *reads = extract_stmt_accesses(read, i);
-	isl_union_map *writes = extract_stmt_accesses(write, i);
-	extract_access_fns(reads, writes, prog->stmts[i], i);
-	isl_union_map_free(reads);
-	isl_union_map_free(writes);
+        isl_union_map *reads = extract_stmt_accesses(read, i);
+        isl_union_map *writes = extract_stmt_accesses(write, i);
+        extract_access_fns(reads, writes, prog->stmts[i], i);
+        isl_union_map_free(reads);
+        isl_union_map_free(writes);
     }
 
     if (prog->nstmts >= 1) {
@@ -623,6 +724,7 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     }
 
     Band **bands, **ibands;
+    int max_dim=0, b;
     bands = pluto_get_outermost_permutable_bands(prog, &nbands);
     ibands = pluto_get_innermost_permutable_bands(prog, &n_ibands);
     if (!options->silent) {
@@ -632,11 +734,45 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
         pluto_bands_print(ibands, n_ibands);
     }
 
+    for (b = 0; b < nbands; b++) {
+        int dim=0;
+        for (i=0; i < bands[b]->width; i++)   {
+            for (j=0; j<bands[b]->loop->nstmts; j++) {
+                if (pluto_is_hyperplane_loop(bands[b]->loop->stmts[j], bands[b]->loop->depth+i))
+                    break;
+            }
+            int loop = (j<bands[b]->loop->nstmts);
+            if (loop) {
+                dim++;
+            }
+        }
+        max_dim = (dim > max_dim) ? dim : max_dim;
+    }
+
+    tile_space = isl_space_set_alloc(ctx, 0, max_dim);
+    tile_sizes = isl_set_universe(isl_space_copy(tile_space));
+    for (i = 0; i < max_dim; i++) {
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
+        c = isl_constraint_set_constant_si(c, -4);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
+        c = isl_constraint_set_constant_si(c, 10);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+    }
+    struct pluto_tile_footprint_meta_info psmi = {prog, 0, 0, read, write, domains};
+    isl_set_foreach_point(tile_sizes, tile_footprint_tile_size, &psmi);
+    isl_set_free(tile_sizes);
+    isl_space_free(tile_space);
+
     if (options->tile) {
-        pluto_tile(prog);
-        schedules = isl_union_map_for_pluto_schedule(prog, ctx, space);
-        compute_tile_footprint(domains, schedules, read, write, prog);
-        isl_union_map_free(schedules);
+        /* pluto_tile(prog); */
+        /* schedules = isl_union_map_for_pluto_schedule(prog, ctx, space); */
+        /* compute_tile_footprint(domains, schedules, read, write, prog); */
+        /* isl_union_map_free(schedules); */
     }else{
         if (options->intratileopt) {
             pluto_intra_tile_optimize(prog, 0);

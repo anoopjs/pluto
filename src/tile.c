@@ -251,7 +251,7 @@ void pluto_tile(PlutoProg *prog)
         }
     }
     pluto_loops_free(loops, nloops);
-    
+
     /* Now, we are ready to tile */
     if (options->lt >= 0 && options->ft >= 0)   {
         /* User option specified tiling */
