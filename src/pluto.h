@@ -462,7 +462,7 @@ void getOutermostTilableBand(PlutoProg *prog, int *bandStart, int *bandEnd);
 
 void pluto_gen_cloog_file(FILE *fp, const PlutoProg *prog);
 void cut_lightest_edge(Stmt *stmts, int nstmts, Dep *deps, int ndeps, int);
-void pluto_tile(PlutoProg *);
+void pluto_tile(PlutoProg *, int *);
 bool pluto_create_tile_schedule(PlutoProg *prog, Band **bands, int nbands);
 int pluto_detect_mark_unrollable_loops(PlutoProg *prog);
 
