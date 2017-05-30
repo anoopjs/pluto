@@ -537,6 +537,7 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
     int tile_dim;
     long tile_footprint;
     int *tile_size;
+    bool last=true;
 
     static isl_point **overflowed_tile_sizes = NULL;
     static int n_overflowed=0;
@@ -548,9 +549,9 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
 
     if (!overflowed_tile_sizes) {
         overflowed_tile_sizes = (isl_point **) malloc (0);
+        last=false;
     }
     else {
-        bool last=true;
         for (j = 0; j < tile_dim; j++) {
             isl_val *val = isl_point_get_coordinate_val(pnt, isl_dim_set, j);
             long value = isl_val_get_num_si(val);
@@ -584,7 +585,6 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
                     overflowed_tile_sizes=NULL;
                     n_overflowed=0;
                 }
-
                 isl_space_free(space);
                 isl_point_free(pnt);
                 return isl_stat_ok;
@@ -656,7 +656,7 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
         }
     }
 
-    if (tile_footprint > DEFAULT_L1_CACHE_SIZE) {
+    if (tile_footprint > DEFAULT_L1_CACHE_SIZE && !last) {
         n_overflowed++;
         overflowed_tile_sizes = (isl_point **) realloc(overflowed_tile_sizes,
                                                        n_overflowed*sizeof(isl_point *));
@@ -846,8 +846,8 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     tile_space = isl_space_set_alloc(ctx, 0, 2*max_dim);
     tile_sizes = isl_set_universe(isl_space_copy(tile_space));
     for (i = 0; i < max_dim; i++) {
-        int lb = psmi.best_fit_size[i] + 16;
-        int ub = (int) pow(2, log2l(psmi.best_fit_size[i])+1) - 16;
+        int lb = psmi.best_fit_size[i];
+        int ub = (int) pow(2, (int) (log2l(psmi.best_fit_size[i]))+1);
 
         c = isl_constraint_alloc_equality(isl_local_space_from_space(isl_space_copy(tile_space)));
         c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
@@ -889,6 +889,7 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
 
     if (options->tile) {
         pluto_tile(prog, psmi.best_fit_size);
+        free(psmi.best_fit_size);
     }else{
         if (options->intratileopt) {
             pluto_intra_tile_optimize(prog, 0);
@@ -929,7 +930,6 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     schedules = isl_union_map_for_pluto_schedule(prog, ctx, space);
     pluto_prog_free(prog);
     isl_space_free(space);
-
     t_all = rtclock() - t_start;
 
     if (options->time && !options->silent) {
