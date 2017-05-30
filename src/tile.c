@@ -38,7 +38,7 @@ static int read_tile_sizes(int *tile_sizes, int *l2_tile_size_ratios,
 
     FILE *tsfile = fopen("tile.sizes", "r");
 
-    if (!tsfile)    return 0;
+    if (!tsfile && !auto_tile_size)    return 0;
 
     IF_DEBUG(printf("[pluto] Reading %d tile sizes\n", num_tile_dims););
 
@@ -46,19 +46,31 @@ static int read_tile_sizes(int *tile_sizes, int *l2_tile_size_ratios,
         num_tile_dims = options->lt - options->ft + 1;
     }
 
-    for (i=0, k=0; i < num_tile_dims && !feof(tsfile); i++)   {
-        for (j=0; j<nstmts; j++) {
-            if (pluto_is_hyperplane_loop(stmts[j], firstLoop+i)) break;
-        }
-        int loop = (j<nstmts);
-        if (loop) {
-            if (auto_tile_size)
+    if (auto_tile_size) {
+        for (i=0, k=0; i < num_tile_dims; i++)   {
+            for (j=0; j<nstmts; j++) {
+                if (pluto_is_hyperplane_loop(stmts[j], firstLoop+i)) break;
+            }
+            int loop = (j<nstmts);
+            if (loop) {
                 tile_sizes[i] = auto_tile_size[k++];
-            else
+            }else{
+                /* Size set for scalar dimension doesn't matter */
+                tile_sizes[i] = 42;
+            }
+        }
+    } else {
+        for (i=0, k=0; i < num_tile_dims && !feof(tsfile); i++)   {
+            for (j=0; j<nstmts; j++) {
+                if (pluto_is_hyperplane_loop(stmts[j], firstLoop+i)) break;
+            }
+            int loop = (j<nstmts);
+            if (loop) {
                 fscanf(tsfile, "%d", &tile_sizes[i]);
-        }else{
-            /* Size set for scalar dimension doesn't matter */
-            tile_sizes[i] = 42;
+            }else{
+                /* Size set for scalar dimension doesn't matter */
+                tile_sizes[i] = 42;
+            }
         }
     }
 

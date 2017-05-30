@@ -896,7 +896,7 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     if (options->tile) {
         int *best_fit_size = NULL;
         if (options->autotilesize) {
-            get_auto_tile_size(prog, domains, read, write);
+            best_fit_size = get_auto_tile_size(prog, domains, read, write);
         }
         pluto_compute_dep_directions(prog);
         pluto_compute_dep_satisfaction(prog);
