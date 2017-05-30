@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "pluto.h"
+#include "constraints.h"
 #include "post_transform.h"
 #include "program.h"
 #include "transforms.h"
@@ -557,6 +558,4 @@ void getInnermostTilableBand(PlutoProg *prog, int *bandStart, int *bandEnd)
     }
     *bandStart = *bandEnd = lastloop;
 }
-
-
 

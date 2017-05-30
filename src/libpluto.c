@@ -31,12 +31,8 @@
 #include "pluto/libpluto.h"
 #include "isl/map.h"
 #include "isl/polynomial.h"
-#include "barvinok/isl.h"
 #include "candl/scop.h"
-
-#define DEFAULT_L1_CACHE_SIZE 32768
-#define DEFAULT_L1_CACHE_LINESIZE 64
-#define DEFAULT_DATA_TYPE double
+#include "barvinok/isl.h"
 
 PlutoOptions *options;
 
@@ -282,48 +278,6 @@ __isl_give isl_union_map *extract_stmt_accesses(__isl_keep isl_union_map *map, i
     return new_map;
 }
 
-/*
- * Pluto tiling modifies the domain; move the information from the
- * domain to the schedules (inequalities will be added to the schedules)
- * Polly for LLVM expects domains to remain unchanged
- * (space/dimensionality-wise)
- */
-PlutoConstraints *normalize_domain_schedule(Stmt *stmt, PlutoProg *prog)
-{
-    int del, r, c, j, snodes, nrows;
-    PlutoConstraints *domain;
-
-    PlutoConstraints *sched = pluto_stmt_get_schedule(stmt);
-
-    domain = stmt->domain;
-    snodes = stmt->dim - stmt->dim_orig;
-
-    while (domain != NULL) {
-        del = 0;
-        nrows = domain->nrows;
-        for (r=0; r<nrows; r++) {
-            for (c=0; c<snodes; c++) {
-                if (domain->val[r-del][c] != 0) break;
-            }
-            if (c < snodes) {
-                PlutoConstraints *cut = pluto_constraints_select_row(domain, r-del);
-                for (j=0; j<stmt->trans->nrows; j++) {
-                    pluto_constraints_add_dim(cut, 0, NULL);
-                }
-                pluto_constraints_add(sched, cut);
-                pluto_constraints_remove_row(domain, r-del);
-                del++;
-            }
-        }
-        domain = domain->next;
-    }
-
-    for (c=0; c<snodes; c++) {
-        pluto_stmt_remove_dim(stmt, 0, prog);
-    }
-    return sched;
-}
-
 struct pluto_tile_footprint_meta_info {
     PlutoProg *prog;
     isl_union_map *sched;
@@ -477,6 +431,47 @@ long compute_tile_footprint(isl_union_set *domains,
     return tile_footprint;
 }
 
+/*
+ * Pluto tiling modifies the domain; move the information from the
+ * domain to the schedules (inequalities will be added to the schedules)
+ * Polly for LLVM expects domains to remain unchanged
+ * (space/dimensionality-wise)
+ */
+PlutoConstraints *normalize_domain_schedule(Stmt *stmt, PlutoProg *prog)
+{
+    int del, r, c, j, snodes, nrows;
+    PlutoConstraints *domain;
+
+    PlutoConstraints *sched = pluto_stmt_get_schedule(stmt);
+
+    domain = stmt->domain;
+    snodes = stmt->dim - stmt->dim_orig;
+
+    while (domain != NULL) {
+        del = 0;
+        nrows = domain->nrows;
+        for (r=0; r<nrows; r++) {
+            for (c=0; c<snodes; c++) {
+                if (domain->val[r-del][c] != 0) break;
+            }
+            if (c < snodes) {
+                PlutoConstraints *cut = pluto_constraints_select_row(domain, r-del);
+                for (j=0; j<stmt->trans->nrows; j++) {
+                    pluto_constraints_add_dim(cut, 0, NULL);
+                }
+                pluto_constraints_add(sched, cut);
+                pluto_constraints_remove_row(domain, r-del);
+                del++;
+            }
+        }
+        domain = domain->next;
+    }
+
+    for (c=0; c<snodes; c++) {
+        pluto_stmt_remove_dim(stmt, 0, prog);
+    }
+    return sched;
+}
 
 /* Construct isl_union_map for pluto schedules */
 __isl_give isl_union_map *isl_union_map_for_pluto_schedule(PlutoProg *prog,
@@ -557,7 +552,7 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
             long value = isl_val_get_num_si(val);
             isl_val_free(val);
             if ((exponential && value != 10) ||
-                (!exponential && value == (long) pow(2, ((long) log2l(value))+1))) {
+                (!exponential && value != (long) pow(2, ((long) log2l(value))))) {
                 last = false;
             }
         }
@@ -693,6 +688,99 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
     return isl_stat_ok;
 }
 
+int *get_auto_tile_size(PlutoProg *prog,
+                        isl_union_set *domains,
+                        isl_union_map *read,
+                        isl_union_map *write)
+{
+    int i, j;
+    Band **bands;
+    int max_dim=0, b;
+    int nbands;
+    isl_set *tile_sizes;
+    isl_constraint *c;
+    isl_space *tile_space;
+    isl_ctx *ctx = isl_union_set_get_ctx(domains);
+    bands = pluto_get_outermost_permutable_bands(prog, &nbands);
+
+    for (b = 0; b < nbands; b++) {
+        int dim=0;
+        for (i=0; i < bands[b]->width; i++)   {
+            for (j=0; j<bands[b]->loop->nstmts; j++) {
+                if (pluto_is_hyperplane_loop(bands[b]->loop->stmts[j], bands[b]->loop->depth+i))
+                    break;
+            }
+            int loop = (j<bands[b]->loop->nstmts);
+            if (loop) {
+                dim++;
+            }
+        }
+        max_dim = (dim > max_dim) ? dim : max_dim;
+    }
+
+    tile_space = isl_space_set_alloc(ctx, 0, max_dim);
+    tile_sizes = isl_set_universe(isl_space_copy(tile_space));
+    for (i = 0; i < max_dim; i++) {
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
+        c = isl_constraint_set_constant_si(c, -4);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
+        c = isl_constraint_set_constant_si(c, 10);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+    }
+
+    struct pluto_tile_footprint_meta_info psmi = {prog, 0, 0, read, write, domains, 0, 0, true};
+    isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &psmi);
+    isl_set_free(tile_sizes);
+    isl_space_free(tile_space);
+
+    tile_space = isl_space_set_alloc(ctx, 0, 2*max_dim);
+    tile_sizes = isl_set_universe(isl_space_copy(tile_space));
+    for (i = 0; i < max_dim; i++) {
+        int lb = psmi.best_fit_size[i];
+        int ub = (int) pow(2, (int) (log2l(psmi.best_fit_size[i]))+1);
+
+        c = isl_constraint_alloc_equality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, max_dim+i, 16);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
+        c = isl_constraint_set_constant_si(c, -lb);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
+        c = isl_constraint_set_constant_si(c, ub);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+
+        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
+        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
+        c = isl_constraint_set_constant_si(c, 1024);
+        tile_sizes = isl_set_add_constraint(tile_sizes, c);
+    }
+
+    tile_sizes = isl_set_project_out(tile_sizes, isl_dim_set, max_dim, max_dim);
+
+    psmi.exponential = false;
+    isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &psmi);
+    isl_set_free(tile_sizes);
+    isl_space_free(tile_space);
+
+    if (psmi.best_fit_size) {
+        printf("Auto-selected tile size is ");
+        for (j = 0; j < max_dim; j++)
+            printf("%d ", psmi.best_fit_size[j]);
+        printf("\n");
+    }
+
+    return psmi.best_fit_size;
+}
+
 /*
  * Output schedules are isl relations that have dims in the order
  * isl_dim_out, isl_dim_in, div, param, const
@@ -703,14 +791,11 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
      isl_union_map *write,
      PlutoOptions *options_l)
 {
-    int i, j, nbands, n_ibands, retval;
+    int i, nbands, n_ibands, retval;
     isl_ctx *ctx;
     isl_space *space;
     double t_t, t_all, t_start;
     isl_union_map *schedules;
-    isl_set *tile_sizes;
-    isl_constraint *c;
-    isl_space *tile_space;
 
     ctx = isl_union_set_get_ctx(domains);
     space = isl_union_set_get_space(domains);
@@ -799,7 +884,6 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
     }
 
     Band **bands, **ibands;
-    int max_dim=0, b;
     bands = pluto_get_outermost_permutable_bands(prog, &nbands);
     ibands = pluto_get_innermost_permutable_bands(prog, &n_ibands);
     if (!options->silent) {
@@ -809,87 +893,15 @@ __isl_give isl_union_map *pluto_schedule(isl_union_set *domains,
         pluto_bands_print(ibands, n_ibands);
     }
 
-    for (b = 0; b < nbands; b++) {
-        int dim=0;
-        for (i=0; i < bands[b]->width; i++)   {
-            for (j=0; j<bands[b]->loop->nstmts; j++) {
-                if (pluto_is_hyperplane_loop(bands[b]->loop->stmts[j], bands[b]->loop->depth+i))
-                    break;
-            }
-            int loop = (j<bands[b]->loop->nstmts);
-            if (loop) {
-                dim++;
-            }
-        }
-        max_dim = (dim > max_dim) ? dim : max_dim;
-    }
-
-    tile_space = isl_space_set_alloc(ctx, 0, max_dim);
-    tile_sizes = isl_set_universe(isl_space_copy(tile_space));
-    for (i = 0; i < max_dim; i++) {
-        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
-        c = isl_constraint_set_constant_si(c, -4);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-
-        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
-        c = isl_constraint_set_constant_si(c, 10);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-    }
-
-    struct pluto_tile_footprint_meta_info psmi = {prog, 0, 0, read, write, domains, 0, 0, true};
-    isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &psmi);
-    isl_set_free(tile_sizes);
-    isl_space_free(tile_space);
-
-    tile_space = isl_space_set_alloc(ctx, 0, 2*max_dim);
-    tile_sizes = isl_set_universe(isl_space_copy(tile_space));
-    for (i = 0; i < max_dim; i++) {
-        int lb = psmi.best_fit_size[i];
-        int ub = (int) pow(2, (int) (log2l(psmi.best_fit_size[i]))+1);
-
-        c = isl_constraint_alloc_equality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, max_dim+i, 16);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-
-        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, 1);
-        c = isl_constraint_set_constant_si(c, -lb);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-
-        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
-        c = isl_constraint_set_constant_si(c, ub);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-
-        c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(tile_space)));
-        c = isl_constraint_set_coefficient_si(c, isl_dim_set, i, -1);
-        c = isl_constraint_set_constant_si(c, 1024);
-        tile_sizes = isl_set_add_constraint(tile_sizes, c);
-    }
-
-    tile_sizes = isl_set_project_out(tile_sizes, isl_dim_set, max_dim, max_dim);
-
-    psmi.exponential = false;
-    isl_set_foreach_point(tile_sizes, tile_footprint_for_tile_size, &psmi);
-    isl_set_free(tile_sizes);
-    isl_space_free(tile_space);
-
-    if (psmi.best_fit_size) {
-        printf("Auto-selected tile size is ");
-        for (j = 0; j < max_dim; j++)
-            printf("%d ", psmi.best_fit_size[j]);
-        printf("\n");
-    }
-
-    pluto_compute_dep_directions(prog);
-    pluto_compute_dep_satisfaction(prog);
-
     if (options->tile) {
-        pluto_tile(prog, psmi.best_fit_size);
-        free(psmi.best_fit_size);
+        int *best_fit_size = NULL;
+        if (options->autotilesize) {
+            get_auto_tile_size(prog, domains, read, write);
+        }
+        pluto_compute_dep_directions(prog);
+        pluto_compute_dep_satisfaction(prog);
+        pluto_tile(prog, best_fit_size);
+        free(best_fit_size);
     }else{
         if (options->intratileopt) {
             pluto_intra_tile_optimize(prog, 0);
@@ -1196,7 +1208,7 @@ __isl_give isl_union_map *pluto_parallel_schedule_with_remapping(isl_union_set *
         Remapping** remap,
         PlutoOptions *options_l)
 {
-    int i, j, nbands, n_ibands, retval;
+    int i, nbands, n_ibands, retval;
     isl_ctx *ctx;
     isl_space *space;
     double t_t, t_all, t_start;
@@ -1345,35 +1357,7 @@ __isl_give isl_union_map *pluto_parallel_schedule_with_remapping(isl_union_set *
          }
     }
 
-    /* Construct isl_union_map for pluto schedules */
-    isl_union_map *schedules = isl_union_map_empty(isl_space_copy(space));
-    for (i=0; i<prog->nstmts; i++) {
-        isl_basic_map *bmap;
-        isl_map *map;
-        Stmt *stmt = prog->stmts[i];
-        PlutoConstraints *sched = normalize_domain_schedule(stmt, prog);
-        // pluto_constraints_print(stdout, sched);
-
-        bmap = isl_basic_map_from_pluto_constraints(ctx, sched,
-                sched->ncols - stmt->trans->nrows - prog->npar - 1,
-                stmt->trans->nrows, prog->npar);
-        bmap = isl_basic_map_project_out(bmap, isl_dim_in, 0, sched->ncols - stmt->trans->nrows - stmt->domain->ncols);
-        char name[20];
-        snprintf(name, sizeof(name), "S_%d", i);
-        map = isl_map_from_basic_map(bmap);
-
-        /* Copy ids of the original parameter dimensions  */
-        for (j=0; j<isl_space_dim(space, isl_dim_param); j++) {
-            isl_id *id = isl_space_get_dim_id(space, isl_dim_param, j);
-            map = isl_map_set_dim_id(map, isl_dim_param, j, id);
-        }
-
-        map = isl_map_set_tuple_name(map, isl_dim_in, name);
-        schedules = isl_union_map_union(schedules, isl_union_map_from_map(map));
-
-        pluto_constraints_free(sched);
-    }
-
+    isl_union_map *schedules = isl_union_map_for_pluto_schedule(prog, ctx, space);
     pluto_prog_free(prog);
     isl_space_free(space);
 
