@@ -290,7 +290,7 @@ struct pluto_tile_footprint_meta_info {
     bool exponential;
 };
 
-static int count_tile_footprint_access(__isl_take isl_map *map, void *user)
+static int count_tile_footprint_for_access(__isl_take isl_map *map, void *user)
 {
     struct pluto_tile_footprint_meta_info *ptfmi = (struct pluto_tile_footprint_meta_info *) user;
     isl_union_map *sched = ptfmi->sched;
@@ -336,11 +336,11 @@ static int count_tile_footprint_access(__isl_take isl_map *map, void *user)
     isl_space_free(space);
     space = isl_map_get_space(mem_to_sched_map);
 
-    for (j=0; j<isl_space_dim(space, isl_dim_in); j++) {
+    for (j = 0; j < isl_space_dim(space, isl_dim_in); j++) {
         int n = isl_space_dim(space, isl_dim_out)-isl_space_dim(space, isl_dim_in)+j;
         int div = DEFAULT_L1_CACHE_LINESIZE/sizeof(DEFAULT_DATA_TYPE);
 
-        if (j == isl_space_dim(space, isl_dim_in)-1) {
+        if (j == isl_space_dim(space, isl_dim_in) - 1) {
           c = isl_constraint_alloc_inequality(isl_local_space_from_space(isl_space_copy(space)));
           c = isl_constraint_set_coefficient_si(c, isl_dim_out, n, div);
           c = isl_constraint_set_constant_si(c, div-1);
@@ -385,7 +385,7 @@ static int count_tile_footprint_access(__isl_take isl_map *map, void *user)
     isl_space_free(space);
     space = isl_map_get_space(mem_to_sched_map);
 
-    for (j=param_offset; j<isl_space_dim(space, isl_dim_param); j++) {
+    for (j = param_offset; j < isl_space_dim(space, isl_dim_param); j++) {
         c = isl_constraint_alloc_equality(isl_local_space_from_space(isl_space_copy(space)));
         c = isl_constraint_set_coefficient_si(c, isl_dim_param, j, 1);
         c = isl_constraint_set_coefficient_si(c, isl_dim_out, j-param_offset, -1);
@@ -425,7 +425,7 @@ long compute_tile_footprint(isl_union_set *domains,
     sched = isl_union_map_intersect_domain(isl_union_map_copy(schedule),
                                            isl_union_set_copy(domains));
     struct pluto_tile_footprint_meta_info psmi = {prog, sched, &tile_footprint, 0, 0, 0, 0, 0, 0};
-    isl_union_map_foreach_map(accesses, &count_tile_footprint_access, &psmi);
+    isl_union_map_foreach_map(accesses, &count_tile_footprint_for_access, &psmi);
     isl_union_map_free(accesses);
     isl_union_map_free(sched);
     return tile_footprint;
@@ -533,6 +533,7 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
     long tile_footprint;
     int *tile_size;
     bool last=true;
+    int silent;
 
     static isl_point **overflowed_tile_sizes = NULL;
     static int n_overflowed=0;
@@ -545,8 +546,7 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
     if (!overflowed_tile_sizes) {
         overflowed_tile_sizes = (isl_point **) malloc (0);
         last=false;
-    }
-    else {
+    } else {
         for (j = 0; j < tile_dim; j++) {
             isl_val *val = isl_point_get_coordinate_val(pnt, isl_dim_set, j);
             long value = isl_val_get_num_si(val);
@@ -569,8 +569,9 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
                 long b = isl_val_get_num_si(val);
                 isl_val_free(val);
 
-                if ((a-b) != 0)
+                if ((a-b) != 0) {
                     count++;
+                }
             }
             if (count == 1) {
                 if (last) {
@@ -626,7 +627,13 @@ static int tile_footprint_for_tile_size(__isl_take isl_point *pnt, void *user)
     pluto_compute_dep_directions(prog);
     pluto_compute_dep_satisfaction(prog);
 
+    silent = prog->options->silent;
+    prog->options->silent = true;
+
     pluto_tile(prog, tile_size);
+
+    prog->options->silent = silent;
+
     schedules = isl_union_map_for_pluto_schedule(prog, ctx, space);
     tile_footprint = compute_tile_footprint(domain, schedules, read, write, prog);
 
@@ -771,7 +778,7 @@ int *get_auto_tile_size(PlutoProg *prog,
     isl_set_free(tile_sizes);
     isl_space_free(tile_space);
 
-    if (psmi.best_fit_size) {
+    if (!prog->options->silent && psmi.best_fit_size) {
         printf("Auto-selected tile size is ");
         for (j = 0; j < max_dim; j++)
             printf("%d ", psmi.best_fit_size[j]);
